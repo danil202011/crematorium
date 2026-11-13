@@ -1,3 +1,4 @@
+from .fused import mul_add
 from .spike_train import SpikeTrain
 from .surrogate_gradients import (
     atan_surrogate,
@@ -20,6 +21,7 @@ __all__ = [
     "atan_surrogate",
     "default_spike_grad",
     "fast_sigmoid_surrogate",
+    "mul_add",
     "multiple_of",
     "normalize_spatial",
     "positive",

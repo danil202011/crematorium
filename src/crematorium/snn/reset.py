@@ -6,10 +6,58 @@ from typing import TYPE_CHECKING, Callable
 import types
 from typing import Any
 
+import torch
+
 from crematorium import ParamSpec, StateSpec, StepOutput, identity
 from crematorium.module.mixins.states import StateMixin
 
 _CR_RESET_CACHE: dict[str, Any] = {}
+
+
+# Fused reset kernels. Each takes the plain expression documented on
+# ``Reset`` and runs it as one op when operand dtypes/devices agree (falling
+# back to the plain expression otherwise, so type promotion is unchanged).
+# Values and gradients match the plain expressions; in eager mode they save
+# one kernel launch per state per timestep.
+
+
+def _cr_fusable(*ts: Any) -> bool:
+    first = ts[0]
+    return all(
+        isinstance(t, torch.Tensor)
+        and t.dtype == first.dtype
+        and t.device == first.device
+        for t in ts
+    )
+
+
+def _cr_reset_subtract(state: Any, spk: Any, p: Any) -> Any:
+    # state - spk * p
+    if _cr_fusable(state, spk, p):
+        return torch.addcmul(state, spk, p, value=-1)
+    return state - spk * p
+
+
+def _cr_reset_add(state: Any, spk: Any, p: Any) -> Any:
+    # state + spk * p
+    if _cr_fusable(state, spk, p):
+        return torch.addcmul(state, spk, p)
+    return state + spk * p
+
+
+def _cr_reset_set(state: Any, spk: Any, p: Any) -> Any:
+    # (1 - spk) * state + spk * p; lerp is exact at weight 0 and 1
+    if _cr_fusable(state, spk, p):
+        return torch.lerp(state, p, spk)
+    return (1 - spk) * state + spk * p
+
+
+def _cr_reset_zero(state: Any, spk: Any) -> Any:
+    # state * (1 - spk) == state - state * spk
+    if _cr_fusable(state, spk):
+        return torch.addcmul(state, state, spk, value=-1)
+    return state * (1 - spk)
+
 
 if TYPE_CHECKING:
     from .module import SnnModule
@@ -166,16 +214,11 @@ class ResetMixin(StateMixin):
             if reset_spec.kind in ("subtract", "set", "add"):
                 param_name = self._cr_resolve_param_name(reset_spec.target)  # type: ignore[attr-defined]
                 param_value = self._cr_constraint_expr(param_name)  # type: ignore[attr-defined]
-                if reset_spec.kind == "subtract":
-                    lines.append(f"state_{i} = state_{i} - spk * {param_value}")
-                elif reset_spec.kind == "set":
-                    lines.append(
-                        f"state_{i} = (1 - spk) * state_{i} + spk * {param_value}"
-                    )
-                else:
-                    lines.append(f"state_{i} = state_{i} + spk * {param_value}")
+                lines.append(
+                    f"state_{i} = _cr_reset_{reset_spec.kind}(state_{i}, spk, {param_value})"
+                )
             elif reset_spec.kind == "zero":
-                lines.append(f"state_{i} = state_{i} * (1 - spk)")
+                lines.append(f"state_{i} = _cr_reset_zero(state_{i}, spk)")
             elif reset_spec.kind == "hard_zero":
                 lines.append(f"state_{i} = state_{i}.masked_fill(spk > 0, 0.0)")
             elif reset_spec.kind == "custom":
@@ -210,7 +253,12 @@ class ResetMixin(StateMixin):
         if cached is not None:
             self._cr_apply_resets = types.MethodType(cached, self)  # type: ignore[attr-defined]
             return
-        ns: dict[str, object] = {}
+        ns: dict[str, object] = {
+            "_cr_reset_subtract": _cr_reset_subtract,
+            "_cr_reset_add": _cr_reset_add,
+            "_cr_reset_set": _cr_reset_set,
+            "_cr_reset_zero": _cr_reset_zero,
+        }
         exec(src, ns)
         _CR_RESET_CACHE[src] = ns["_cr_apply_resets"]
         self._cr_apply_resets = types.MethodType(ns["_cr_apply_resets"], self)  # type: ignore[attr-defined]
