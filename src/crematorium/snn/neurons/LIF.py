@@ -5,6 +5,7 @@ from crematorium import (
     clamp_unit_interval,
 )
 from crematorium.snn import Reset, SnnModule
+from crematorium.util.fused import mul_add
 
 
 class LIF(SnnModule):
@@ -36,7 +37,7 @@ class LIF(SnnModule):
         beta = self.constrain("beta")
         threshold = self.constrain("threshold")
 
-        mem = beta * mem + x
+        mem = mul_add(beta, mem, x)
         spk = self.spike_grad(mem - threshold)
 
         return spk, mem

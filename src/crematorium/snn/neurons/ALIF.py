@@ -5,6 +5,7 @@ from crematorium import (
     clamp_unit_interval,
 )
 from crematorium.snn import Reset, SnnModule
+from crematorium.util.fused import mul_add
 
 
 class ALIF(SnnModule):
@@ -57,8 +58,8 @@ class ALIF(SnnModule):
         beta_a = self.constrain("beta_a")
         tau_a = self.constrain("tau_a")
 
-        mem = beta * mem + x
-        spk = self.spike_grad(mem - (threshold + beta_a * adapt))
-        adapt = tau_a * adapt + spk
+        mem = mul_add(beta, mem, x)
+        spk = self.spike_grad(mem - mul_add(beta_a, adapt, threshold))
+        adapt = mul_add(tau_a, adapt, spk)
 
         return spk, mem, adapt

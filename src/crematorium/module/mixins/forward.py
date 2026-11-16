@@ -111,6 +111,15 @@ class ForwardMixin(StateMixin):
         # caller silently garbled output in fast mode. Only the per-tensor
         # dtype checks (and the shape checks in the hidden paths) honor the
         # validate flag.
+        self._cr_check_explicit_inputs(inputs, state)
+        return self._cr_forward_core(inputs, state)
+
+    def _cr_check_explicit_inputs(
+        self,
+        inputs: tuple[Tensor, ...],
+        state: tuple[Tensor, ...],
+    ) -> None:
+        """Input/state arity (always) and input dtypes (when validating)."""
         expected_inputs = len(self._cr_input_names)
 
         if len(inputs) != expected_inputs:
@@ -129,6 +138,17 @@ class ForwardMixin(StateMixin):
         if is_validating(self):
             check_input_dtypes(self, inputs)
 
+    def _cr_forward_core(
+        self,
+        inputs: tuple[Tensor, ...],
+        state: tuple[Tensor, ...],
+    ) -> StepOutput:
+        """
+        One explicit step after the input checks: ``_step``, the output
+        contract check and the post-step chain. Sequence scans call this per
+        timestep after checking the inputs once for the whole sequence; the
+        step output arity check keeps the threaded state arity valid.
+        """
         out = self._step(*inputs, *state)
 
         # Runtime contract check: a user-authored _step may return a

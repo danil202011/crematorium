@@ -20,16 +20,25 @@ from ..specs import (
 _GLOBAL_VALIDATE_CTX: ContextVar[bool] = ContextVar("_GLOBAL_VALIDATE", default=True)
 # Back-compat alias for ``from .validation import _GLOBAL_VALIDATE``
 _GLOBAL_VALIDATE = True
+# Plain-global mirror of the last value set in this process. Dynamo cannot
+# trace ``ContextVar.get`` (every read was a graph break, i.e. one per
+# timestep inside a compiled scan); while tracing, ``get_validation`` reads
+# this global instead, which Dynamo guards on like any other global.
+_GLOBAL_VALIDATE_TRACE = True
 
 
 def set_validation(enabled: bool) -> None:
     """Set the global default for validation."""
+    global _GLOBAL_VALIDATE_TRACE
 
     _GLOBAL_VALIDATE_CTX.set(bool(enabled))
+    _GLOBAL_VALIDATE_TRACE = bool(enabled)
 
 
 def get_validation() -> bool:
     """Return the current global validation default."""
+    if torch.compiler.is_compiling():
+        return _GLOBAL_VALIDATE_TRACE
     return _GLOBAL_VALIDATE_CTX.get()
 
 
@@ -41,11 +50,16 @@ def no_validation():
     wrapping a hot loop in ``no_validation()`` skips their per-forward checks.
     Isolated per context (thread/async-safe) via ContextVar.
     """
+    global _GLOBAL_VALIDATE_TRACE
+
     token = _GLOBAL_VALIDATE_CTX.set(False)
+    previous = _GLOBAL_VALIDATE_TRACE
+    _GLOBAL_VALIDATE_TRACE = False
     try:
         yield
     finally:
         _GLOBAL_VALIDATE_CTX.reset(token)
+        _GLOBAL_VALIDATE_TRACE = previous
 
 
 # The checks below are free functions, so mixin and host code both call them
